@@ -1,26 +1,50 @@
-use anyhow::Result;
+use std::net::SocketAddr;
+
+use anyhow::{Context, Result};
+use clap::Parser;
 use rmcp::{transport::stdio, ServiceExt};
 
-mod supercollider_model;
+mod sc_process;
 mod server;
+mod startup;
+mod streamable_http;
+mod supercollider_model;
 
 use crate::server::SupercolliderMcpServer;
 
+#[derive(Parser)]
+#[command(name = "supercollider-mcp")]
+struct Args {
+    /// Run MCP over Streamable HTTP (Open WebUI, etc.) instead of stdio.
+    #[arg(long)]
+    http: bool,
+
+    /// Bind address for HTTP mode. Use 0.0.0.0:8787 so Dockerized Open WebUI can reach the host.
+    #[arg(long, default_value = "0.0.0.0:8787", value_name = "ADDR")]
+    bind: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging later if needed (tracing, etc.).
-    let server_impl = SupercolliderMcpServer::new();
+    let args = Args::parse();
 
-    // IMPORTANT: write human-readable startup logs to stderr so MCP JSON-RPC
-    // traffic on stdio remains clean for clients.
-    eprintln!("[supercollider-mcp] starting MCP server over stdio");
-    eprintln!("[supercollider-mcp] available tool: ping_supercollider");
+    if args.http {
+        let addr: SocketAddr = args
+            .bind
+            .trim()
+            .parse()
+            .with_context(|| format!("invalid --bind {:?}", args.bind.trim()))?;
+        streamable_http::run(addr).await
+    } else {
+        run_stdio().await
+    }
+}
 
-    // Use rmcp stdio transport so this can be launched as an MCP server by
-    // tools like Claude Desktop or Cursor.
-    // Serve the MCP server.
-    let server = server_impl.serve(stdio()).await?;
-    eprintln!("[supercollider-mcp] ready. waiting for MCP requests.");
+async fn run_stdio() -> Result<()> {
+    startup::stdio();
+
+    let server = SupercolliderMcpServer::new().serve(stdio()).await?;
+    eprintln!("[supercollider-mcp] ready — waiting for MCP requests");
 
     server.waiting().await?;
 

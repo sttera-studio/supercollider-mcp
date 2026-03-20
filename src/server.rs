@@ -6,13 +6,14 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::supercollider_model::SupercolliderServerState;
+use crate::{sc_process, supercollider_model::SupercolliderServerState};
 
 #[derive(Clone)]
 pub struct SupercolliderMcpServer {
     tool_router: ToolRouter<Self>,
+    #[allow(dead_code)]
     state: SupercolliderServerState,
-    // TODO: add SuperCollider connection / OSC config here.
+    // TODO: graph tools + OSC will use `state`.
 }
 
 impl SupercolliderMcpServer {
@@ -26,22 +27,63 @@ impl SupercolliderMcpServer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PingParams {
-    /// Optional message to send with the ping.
+    /// Optional note (echoed in the reply).
     pub message: Option<String>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EmptyParams {}
 
 #[tool_router]
 impl SupercolliderMcpServer {
     /// Simple ping tool that will later check connectivity with SuperCollider.
-    #[tool(description = "Ping the SuperCollider understanding backend (currently mocked).")]
+    #[tool(
+        description = "Ping SuperCollider on this machine: checks whether scsynth/sclang processes are running (no OSC). Also confirms this MCP server is up."
+    )]
     async fn ping_supercollider(&self, Parameters(params): Parameters<PingParams>) -> String {
-        let msg = params
-            .message
-            .unwrap_or_else(|| "Hello from supercollider-mcp boilerplate!".to_string());
-        let node_count = self.state.nodes.len();
+        eprintln!(
+            "[supercollider-mcp] tool start: ping_supercollider params={params:?}"
+        );
 
-        // TODO: in the future, actually check SC connectivity via OSC and include status.
-        format!("SuperCollider MCP boilerplate is running. Message: {msg} (nodes in placeholder model: {node_count})")
+        let report = match tokio::task::spawn_blocking(sc_process::probe).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[supercollider-mcp] tool error: ping_supercollider — spawn_blocking join failed: {e}"
+                );
+                return format!("ping_supercollider failed: {e}");
+            }
+        };
+
+        let reply = match &params.message {
+            Some(m) if !m.trim().is_empty() => format!("{report}\nNote: {m}"),
+            _ => report,
+        };
+
+        eprintln!("[supercollider-mcp] tool ok: ping_supercollider — finished successfully");
+
+        reply
+    }
+
+    #[tool(
+        description = "List SuperCollider audio server processes (scsynth) on this machine with OS stats: RSS, CPU%, uptime, disk I/O counters. Logs one line per server to the supercollider-mcp terminal. Not OSC."
+    )]
+    async fn get_servers(&self, Parameters(_p): Parameters<EmptyParams>) -> String {
+        eprintln!("[supercollider-mcp] tool start: get_servers");
+
+        let report = match tokio::task::spawn_blocking(sc_process::get_servers).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[supercollider-mcp] tool error: get_servers — spawn_blocking join failed: {e}"
+                );
+                return format!("get_servers failed: {e}");
+            }
+        };
+
+        eprintln!("[supercollider-mcp] tool ok: get_servers — finished successfully");
+
+        report
     }
 }
 
@@ -49,7 +91,7 @@ impl SupercolliderMcpServer {
 impl ServerHandler for SupercolliderMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "SuperCollider mega-understanding MCP server (boilerplate)".to_string(),
+            "Use ping_supercollider for a quick scsynth/sclang presence check; use get_servers for per-scsynth OS stats (RSS, CPU, uptime).".to_string(),
         )
     }
 }
